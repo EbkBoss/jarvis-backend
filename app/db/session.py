@@ -5,7 +5,7 @@ from __future__ import annotations
 import aiosqlite
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "jarvis.db"
+DB_PATH = Path(os.environ.get("RAILWAY_VOLUME", "/tmp")) / "jarvis.db"
 
 _conn: aiosqlite.Connection | None = None
 
