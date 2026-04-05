@@ -493,6 +493,14 @@ from app.services.vision import analyze_image
 from app.services.phone_agent import PhoneAgent
 
 
+@router.post("/gen/chat")
+async def gen_chat(body: dict):
+    """Direct AI chat — no session needed. Uncensored."""
+    prompt = body.get("prompt", "")
+    response = await llm_chat(prompt)
+    return {"response": response}
+
+
 @router.post("/gen/image")
 async def gen_image(body: dict):
     """Generate an image from text (DALL-E)."""

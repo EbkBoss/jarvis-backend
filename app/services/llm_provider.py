@@ -22,7 +22,7 @@ PROVIDER_URLS = {
 DEFAULT_MODELS = {
     "openai": "gpt-4o",
     "groq": "llama-3.3-70b-versatile",
-    "openrouter": "anthropic/claude-3.5-sonnet",
+    "openrouter": "qwen/qwen-2.5-72b-instruct",
     "anthropic": "claude-3-7-sonnet-20250219",
     "gemini": "gemini-2.5-pro-preview-03-25",
 }

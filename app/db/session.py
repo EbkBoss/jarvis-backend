@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import aiosqlite
 from pathlib import Path
 
-DB_PATH = Path(os.environ.get("RAILWAY_VOLUME", "/tmp")) / "jarvis.db"
+# Use /tmp on Railway (read-only filesystem), local otherwise
+if os.path.exists("/tmp/jarvis.db"):
+    DB_PATH = Path("/tmp") / "jarvis.db"
+else:
+    DB_PATH = Path(__file__).parent.parent.parent / "data" / "jarvis.db"
 
 _conn: aiosqlite.Connection | None = None
 
