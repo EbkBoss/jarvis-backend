@@ -9,9 +9,7 @@ import time
 import asyncio
 from collections import defaultdict
 
-import aiohttp
-
-from fastapi import Request, HTTPException
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -34,22 +32,29 @@ def filter_secrets(text: str) -> str:
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """All endpoints require X-Jarvis-Key header. Key is compared via SHA-256 hash."""
+    """All endpoints require X-Jarvis-Key header. Accepts raw key or SHA-256 hash."""
 
     def __init__(self, app, api_key: str):
         super().__init__(app)
+        self._api_key = api_key
         self._hash = hashlib.sha256(api_key.encode()).hexdigest() if api_key else None
 
     async def dispatch(self, request: Request, call_next):
+        # Always pass through health, OPTIONS, and WebSocket upgrades
         if request.url.path in ("/api/health",) or request.method == "OPTIONS":
             return await call_next(request)
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)
+        # No key configured — open access
         if not self._hash:
             return await call_next(request)
 
         key = request.headers.get("x-jarvis-key", "")
         if not key:
             return JSONResponse(status_code=401, content={"error": "Auth required. Set X-Jarvis-Key header."})
-        if hashlib.sha256(key.encode()).hexdigest() != self._hash:
+        raw_match = key == self._api_key
+        hash_match = hashlib.sha256(key.encode()).hexdigest() == self._hash
+        if not raw_match and not hash_match:
             return JSONResponse(status_code=403, content={"error": "Invalid API key."})
         return await call_next(request)
 
@@ -65,6 +70,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path in ("/api/health",) or request.method == "OPTIONS":
+            return await call_next(request)
+        if request.headers.get("upgrade", "").lower() == "websocket":
             return await call_next(request)
         ip = request.client.host if request.client else "unknown"
         now = time.monotonic()
