@@ -490,6 +490,7 @@ async def save_session(session_id: int, body: dict = {}):
 
 from app.services import generator
 from app.services.vision import analyze_image
+from app.services.phone_agent import PhoneAgent
 
 
 @router.post("/gen/image")
@@ -608,6 +609,187 @@ async def vision_analyze(image: UploadFile = File(...), prompt: str = Form("Desc
     mime = image.content_type or "image/jpeg"
     text = await analyze_image(data, prompt, mime)
     return {"analysis": text}
+
+
+# ─── Phone Agent (screenshots, install, download, optimize, game mode, input) ────────
+
+
+@router.post("/phone/screenshot")
+async def phone_screenshot():
+    """Take screenshot on phone."""
+    try:
+        return PhoneAgent.screenshot()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/phone/screen-text")
+async def phone_screen_text():
+    """Get current app/window info."""
+    return {"focus": PhoneAgent.screen_text()}
+
+
+@router.get("/phone/apps")
+async def phone_apps():
+    """List installed apps."""
+    return {"apps": PhoneAgent.installed_apps()}
+
+
+@router.post("/phone/launch")
+async def phone_launch(body: dict):
+    """Launch an app by package name."""
+    return PhoneAgent.launch_app(body.get("package", ""))
+
+
+@router.post("/phone/stop")
+async def phone_stop(body: dict):
+    """Force stop an app."""
+    return PhoneAgent.force_stop(body.get("package", ""))
+
+
+@router.post("/phone/download")
+async def phone_download(body: dict):
+    """Download a file to phone."""
+    return PhoneAgent.download(
+        body.get("url", ""),
+        body.get("dest", "/sdcard/Download/"),
+    )
+
+
+@router.get("/phone/downloads")
+async def phone_downloads():
+    """List downloaded files."""
+    return {"files": PhoneAgent.list_downloads()}
+
+
+@router.get("/phone/info")
+async def phone_info():
+    """Phone system info — battery, storage, memory."""
+    return PhoneAgent.system_info()
+
+
+@router.post("/phone/optimize")
+async def phone_optimize():
+    """Kill background apps, free RAM."""
+    killed = PhoneAgent.kill_bg_apps()
+    return {"success": True, "killed_count": len(killed), "apps": killed}
+
+
+@router.post("/phone/game-mode")
+async def phone_game_mode(body: dict):
+    """Enable game/graphics optimizations for a game."""
+    return PhoneAgent.game_mode(body.get("package", ""))
+
+
+@router.post("/phone/tap")
+async def phone_tap(body: dict):
+    """Simulate tap at screen coordinates."""
+    return PhoneAgent.tap(body.get("x", 0), body.get("y", 0))
+
+
+@router.post("/phone/swipe")
+async def phone_swipe(body: dict):
+    """Simulate swipe gesture."""
+    return PhoneAgent.swipe(
+        body.get("x1", 0), body.get("y1", 0),
+        body.get("x2", 0), body.get("y2", 0),
+        body.get("duration", 300),
+    )
+
+
+@router.post("/phone/type")
+async def phone_type(body: dict):
+    """Simulate keyboard typing."""
+    return PhoneAgent.type_text(body.get("text", ""))
+
+
+@router.post("/phone/key")
+async def phone_key(body: dict):
+    """Press a key (3=back, 66=enter, 24=volume up, 25=volume down)."""
+    return PhoneAgent.press_key(body.get("code", 0))
+
+
+@router.post("/phone/shell")
+async def phone_shell(body: dict):
+    """Run raw shell command on phone."""
+    return PhoneAgent.shell(body.get("cmd", ""))
+
+
+# ─── Web Search (fetch any URL content) ──────────────────────────────
+
+
+@router.post("/web/fetch")
+async def web_fetch(body: dict):
+    """Fetch content from any URL — articles, docs, APIs."""
+    url = body.get("url", "")
+    if not url:
+        return {"error": "URL required"}
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        return {"url": url, "status": resp.status_code, "content": resp.text[:10000]}
+
+
+@router.post("/web/search")
+async def web_search(body: dict):
+    """Search the web via free API, then summarize results."""
+    query = body.get("query", "")
+    if not query:
+        return {"error": "Query required"}
+    # Use free search via duckduckgo html
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        resp = await client.get(f"https://html.duckduckgo.com/html/?q={query}", headers={
+            "User-Agent": "Mozilla/5.0"
+        })
+        if resp.status_code == 200:
+            import re
+            results = []
+            for match in re.finditer(r'<a class="result__a" href="([^"]+)">([^<]+)</a>', resp.text):
+                results.append({"url": match.group(1), "title": match.group(2)})
+            return {"results": results[:10], "query": query}
+    return {"error": "Search failed", "query": query}
+
+
+@router.post("/web/summarize")
+async def web_summarize(body: dict):
+    """Fetch a URL and have the LLM summarize it."""
+    url = body.get("url", "")
+    if not url:
+        return {"error": "URL required"}
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        text = resp.text[:8000]
+    summary = await llm_chat(f"Summarize this webpage content:\n\n{text}", "You are a web research assistant. Provide clear, concise summaries.")
+    return {"url": url, "summary": summary}
+
+
+# ─── Smart Agent (auto-detects what to do and chains actions) ──────
+
+
+@router.post("/agent/{session_id}/auto")
+async def agent_auto(session_id: int, body: dict):
+    """
+    Smart agent mode — user sends a free-form request,
+    the LLM decides what tools to use and orchestrates the execution.
+    """
+    user_input = body.get("prompt", "")
+    await memory.store_message(session_id, "user", user_input)
+    runtime.set(session_id, AgentState.PLANNING)
+
+    # Get LLM with full tool description in system prompt
+    tool_desc = (
+        "You are Jarvis, a full super-assistant on EbkBoss's phone & PC. "
+        "You can: write code, generate images/audio/lyrics/beats/stories, "
+        "control Android (screenshots, downloads, installs, game mode, optimization, "
+        "taps, swipes, typing, shell commands), "
+        "search the web, fetch URLs, summarize pages. "
+        "Be direct. No lectures. Just do it."
+    )
+    response = await llm_chat(user_input, tool_desc)
+    runtime.add_tool_call(session_id, ToolCall(tool="agent", args={"prompt": user_input}))
+    runtime.set(session_id, AgentState.DONE, response=response)
+    await memory.store_message(session_id, "assistant", response,
+        {"tool_calls": [tc.to_dict() for tc in runtime.get(session_id).tool_calls]})
+    return {"ok": True, "response": response}
 
 
 # ─── Helpers ────────────────────────────────────────
