@@ -1,13 +1,17 @@
 """
 Security middleware — API key auth, secret filtering, rate limiting.
-Protects your prompts, code, and agent data from unauthorized access.
 """
 from __future__ import annotations
 import hashlib
+import json
 import re
 import time
+import asyncio
 from collections import defaultdict
-from fastapi import Request
+
+import aiohttp
+
+from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -71,41 +75,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-class SecretFilterMiddleware(BaseHTTPMiddleware):
-    """Scans all messages in /send endpoints, strips secrets before storing in DB."""
-
-    async def dispatch(self, request: Request, call_next):
-        # Filter prompt before agent processes it
-        if request.url.path.endswith("/message"):
-            body = await request.body()
-            import json
-            try:
-                parsed = json.loads(body)
-                if "prompt" in parsed:
-                    parsed["prompt"] = filter_secrets(parsed["prompt"])
-                    # Swap body for filtered version
-                    request._receive = lambda: asyncio.Future()
-            except Exception:
-                pass
-
-        response = await call_next(request)
-        # Filter secrets from JSON responses
-        if response.headers.get("content-type", "").startswith("application/json"):
-            import json, asyncio
-            body_bytes = b""
-            async for chunk in response.body_iterator:
-                body_bytes += chunk
-            if body_bytes:
-                try:
-                    data = json.loads(body_bytes)
-                    data = _filter_dict(data)
-                    body_bytes = json.dumps(data).encode()
-                    async def new_iter():
-                        yield body_bytes
-                    response.body_iterator = new_iter()
-                except Exception:
-                    pass
-        return response
+def generate_api_key() -> str:
+    """Generates a cryptographically secure API key."""
+    import secrets
+    return secrets.token_urlsafe(32)
 
 
 def _filter_dict(d):
@@ -114,9 +87,3 @@ def _filter_dict(d):
     if isinstance(d, list):
         return [_filter_dict(x) for x in d]
     return d
-
-
-def generate_api_key() -> str:
-    """Generates a cryptographically secure API key. Save this — it cannot be recovered."""
-    import secrets
-    return secrets.token_urlsafe(32)

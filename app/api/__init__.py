@@ -9,11 +9,12 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.memory.manager import memory
 from app.services.agent import AgentState, AgentMode, ToolCall, runtime
+from app.services.llm_provider import llm_chat
 from app.schemas.session import (
     MessageRequest,
     SessionCreate,
@@ -133,7 +134,7 @@ async def send_message(session_id: int, body: dict | MessageRequest):
     context = await memory.build_context(session_id=session_id)
 
     # Generate response
-    response_text = _generate_response(prompt)
+    response_text = await llm_chat(prompt, context)
 
     runtime.add_tool_call(session_id, ToolCall(tool="think", args={"reasoning": response_text[:200]}))
     runtime.set(session_id, AgentState.DONE, response=response_text)
@@ -173,7 +174,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: int):
             await asyncio.sleep(0.2)
 
             context = await memory.build_context(session_id=session_id)
-            response_text = _generate_response(prompt)
+            response_text = await llm_chat(prompt, context)
             response_text = response_text
 
             # Stream chunks
@@ -373,12 +374,92 @@ async def approve_action(approval_id: str, body: dict):
     return {"ok": True, "approved": approved}
 
 
+@router.post("/sessions/{session_id}/approve")
+async def approve_action_session(session_id: int, body: dict):
+    approved = body.get("approved", False)
+    return {"ok": True, "approved": approved}
+
+
+# ─── Repos ───────────────────────────────────────────
+
+@router.post("/repos/open")
+async def repo_open(body: dict):
+    """Open a repo at a given path."""
+    path = body.get("path", ".")
+    return await list_repo_files(path)
+
+
+@router.post("/repos/index")
+async def repo_index(body: dict):
+    """Index a repo (mock)."""
+    path = body.get("path", ".")
+    return {"status": "indexed", "path": path, "files": 0}
+
+
+@router.get("/repos/files")
+async def repo_files(path: str = ".", max_depth: int = 3):
+    return await list_repo_files(path)
+
+
+# ─── Tools ───────────────────────────────────────────
+
+@router.post("/tools/command")
+async def tool_command(body: dict):
+    """Run a terminal command."""
+    return await run_command(body)
+
+
+@router.post("/tools/patch/apply")
+async def tool_patch(body: dict):
+    """Apply a patch."""
+    patch_text = body.get("patch_text", "")
+    file_path = body.get("file_path", "")
+    return {"ok": True, "patch": patch_text, "file": file_path, "status": "pending"}
+
+
+@router.post("/tools/search")
+async def tool_search(body: dict):
+    """Search code."""
+    return await search_post(body)
+
+
+# ─── Modes ──────────────────────────────────────────
+
+@router.post("/modes/set")
+async def mode_set(body: dict):
+    mode = body.get("mode", "ask")
+    return {"ok": True, "mode": mode}
+
+
+@router.get("/modes/{mode}/permissions")
+async def mode_permissions(mode: str):
+    perms = {
+        "ask": {"read": True, "edit": False, "execute": False},
+        "edit": {"read": True, "edit": True, "execute": False},
+        "agent": {"read": True, "edit": True, "execute": True},
+        "danger": {"read": True, "edit": True, "execute": True, "unrestricted": True},
+    }
+    return perms.get(mode, perms["ask"])
+
+
 # ─── Startup resume ──────────────────────────────────
 
 @router.get("/startup/resume")
 async def resume_session():
     result = await memory.resume_last_session()
-    return result
+    # Map to Android ResumeResponse format
+    return {
+        "status": "ok",
+        "message": f"Resumed session #{result.get('session_id', 0)}",
+        "session_id": result.get("session_id"),
+        "title": result.get("name", ""),
+        "mode": "ASK",
+        "cwd": ".",
+        "repo_path": None,
+        "summary": result.get("context", "")[:500],
+        "working_state": result.get("repo_memory", {}),
+        "project_memory": None,
+    }
 
 
 # ─── Project memory ──────────────────────────────────
@@ -403,6 +484,130 @@ async def save_session(session_id: int, body: dict = {}):
     name = body.get("name") if body else None
     await memory.save_session(session_id, name)
     return {"ok": True}
+
+
+# ─── Generator (DALL-E, TTS, Whisper, Lyrics, Beats, Code, Stories) ─────────────
+
+from app.services import generator
+from app.services.vision import analyze_image
+
+
+@router.post("/gen/image")
+async def gen_image(body: dict):
+    """Generate an image from text (DALL-E)."""
+    return await generator.generate_image(
+        body.get("prompt", ""),
+        body.get("size", "1024x1024"),
+    )
+
+
+@router.post("/gen/tts")
+async def gen_tts(body: dict):
+    """Convert text to speech."""
+    audio = await generator.text_to_speech(
+        body.get("text", ""),
+        body.get("voice", "alloy"),
+        body.get("format", "mp3"),
+    )
+    if audio:
+        return StreamingResponse(iter([audio]), media_type="audio/mpeg")
+    return JSONResponse({"error": "TTS failed — check API key"})
+
+
+@router.post("/gen/whisper")
+async def gen_whisper(
+    file: UploadFile = File(...),
+    language: str = Form("en"),
+):
+    """Transcribe audio to text (Whisper)."""
+    data = await file.read()
+    text = await generator.transcribe_audio(data, file.filename or "audio.mpeg")
+    return {"text": text}
+
+
+@router.post("/gen/lyrics")
+async def gen_lyrics(body: dict):
+    """Generate song lyrics with structure."""
+    return await generator.generate_song_lyrics(
+        body.get("genre", "hip-hop"),
+        body.get("topic", ""),
+        body.get("mood", "energetic"),
+    )
+
+
+@router.post("/gen/beat")
+async def gen_beat(body: dict):
+    """Generate beat-making instructions."""
+    return await generator.generate_beat_instructions(
+        body.get("genre", "hip-hop"),
+        body.get("mood", "hard"),
+        body.get("bpm", 120),
+    )
+
+
+@router.post("/gen/story")
+async def gen_story(body: dict):
+    """Generate a story."""
+    return await generator.generate_story(
+        body.get("prompt", ""),
+        body.get("genre", "fantasy"),
+    )
+
+
+@router.post("/gen/code")
+async def gen_code(body: dict):
+    """Generate production code."""
+    return await generator.generate_code(
+        body.get("prompt", ""),
+        body.get("language", "python"),
+        body.get("context", ""),
+    )
+
+
+@router.post("/gen/script")
+async def gen_script(body: dict):
+    """Generate a video script / storyboard."""
+    return await generator.generate_video_script(
+        body.get("prompt", ""),
+        body.get("duration", 60),
+    )
+
+
+@router.post("/gen/review")
+async def gen_review(body: dict):
+    """Review code for bugs, security, best practices."""
+    return await generator.generate_code_review(
+        body.get("code", ""),
+        body.get("language", "python"),
+    )
+
+
+@router.post("/gen/readme")
+async def gen_readme(body: dict):
+    """Generate README.md for a project."""
+    return await generator.generate_readme(
+        body.get("name", ""),
+        body.get("description", ""),
+        body.get("tech_stack", []),
+    )
+
+
+@router.post("/gen/chat")
+async def gen_chat(body: dict):
+    """Chat endpoint — sends any prompt to the configured LLM."""
+    from app.config import settings as cfg
+    system = body.get("system", "You are Jarvis. Be direct and helpful.")
+    text = await llm_chat(body.get("prompt", ""), system)
+    return {"response": text, "model": cfg.model_base_url or cfg.model_provider}
+
+
+@router.post("/vision/analyze")
+async def vision_analyze(image: UploadFile = File(...), prompt: str = Form("Describe this image in detail. What do you see?")):
+    """Send an image to the LLM for analysis."""
+    data = await image.read()
+    mime = image.content_type or "image/jpeg"
+    text = await analyze_image(data, prompt, mime)
+    return {"analysis": text}
 
 
 # ─── Helpers ────────────────────────────────────────

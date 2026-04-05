@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import router as api_router
 from app.db.session import init_db, close_db
 from app.config import settings
-from app.middleware import AuthMiddleware, RateLimitMiddleware, SecretFilterMiddleware
+from app.middleware import AuthMiddleware, RateLimitMiddleware
 
 
 @asynccontextmanager
@@ -39,7 +39,6 @@ app.add_middleware(
 )
 
 # Security middleware (applied in reverse order of addition)
-app.add_middleware(SecretFilterMiddleware)  # Strips secrets from requests/responses
 app.add_middleware(RateLimitMiddleware, limit=100, window=60)  # 100 req/min per IP
 if settings.api_key:
     app.add_middleware(AuthMiddleware, api_key=settings.api_key)
